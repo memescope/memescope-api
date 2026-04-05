@@ -163,10 +163,10 @@ function parseDexPairs(pairs) {
     seenSyms[sym] = true;
     
     const pc = best.priceChange || {};
-    const mcap = best.marketCap || best.fdv || 0;
-    const vol = best.volume?.h24 || 0;
-    const vol1h = best.volume?.h1 || 0;
-    const liq = best.liquidity?.usd || 0;
+    const mcap = Number(best.marketCap || best.fdv || 0);
+    const vol = Number(best.volume?.h24 || 0);
+    const vol1h = Number(best.volume?.h1 || 0);
+    const liq = Number(best.liquidity?.usd || 0);
     const img = (best.info?.imageUrl) || `https://dd.dexscreener.com/ds-data/tokens/${best.chainId || 'solana'}/${best.baseToken.address}.png`;
     
     let website = '', twitter = '', telegram = '';
@@ -199,9 +199,11 @@ function parseDexPairs(pairs) {
     const p6h = pc.h6 ? parseFloat(pc.h6) : 0;
     const p24h = pc.h24 ? parseFloat(pc.h24) : 0;
     
-    // HARD FILTERS
-    if (!mcap || mcap < 50000) continue;
-    if (!liq || liq < 20000) continue;
+    // HARD FILTERS — absolutely no exceptions
+    const mcapNum = Number(mcap);
+    const liqNum = Number(liq);
+    if (isNaN(mcapNum) || mcapNum < 50000) continue;
+    if (isNaN(liqNum) || liqNum < 20000) continue;
     
     // ===== MEMESCOPE DISCOVERY ALGORITHM v2 =====
     let score = 0;
