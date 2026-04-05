@@ -240,24 +240,86 @@ function parseDexPairs(pairs) {
     }
     
     let txns = 0;
-    if (best.txns?.h24) txns = (best.txns.h24.buys || 0) + (best.txns.h24.sells || 0);
+    let buys24 = 0, sells24 = 0;
+    let buys1h = 0, sells1h = 0;
+    if (best.txns?.h24) {
+      buys24 = best.txns.h24.buys || 0;
+      sells24 = best.txns.h24.sells || 0;
+      txns = buys24 + sells24;
+    }
+    if (best.txns?.h1) {
+      buys1h = best.txns.h1.buys || 0;
+      sells1h = best.txns.h1.sells || 0;
+    }
+    
+    const liq = best.liquidity?.usd || 0;
+    const p5m = pc.m5 ? parseFloat(pc.m5) : 0;
+    const p1h = pc.h1 ? parseFloat(pc.h1) : 0;
+    const p6h = pc.h6 ? parseFloat(pc.h6) : 0;
+    const p24h = pc.h24 ? parseFloat(pc.h24) : 0;
+    const vol1h = best.volume?.h1 || 0;
+    
+    // ===== MEMESCOPE DISCOVERY ALGORITHM =====
+    // HARD FILTERS: must pass or get excluded
+    if (mcap < 50000 || liq < 20000) continue; // Skip tokens under 50K mcap or 20K liquidity
     
     let score = 0;
-    if (mcap > 0 && mcap < 1e6) score += 40;
-    else if (mcap < 5e6) score += 30;
-    else if (mcap < 1e7) score += 20;
-    else if (mcap < 5e7) score += 10;
-    else score += 2;
-    if (mcap > 0) score += Math.min(30, (vol / mcap) * 30);
+    
+    // 1. VOLUME MOMENTUM (0-30 pts)
+    // How much of 24h volume happened in the last hour? Higher = hotter right now
+    if (vol > 0) {
+      const volMomentum = vol1h / (vol / 24); // ratio vs hourly average
+      score += Math.min(30, volMomentum * 5);
+    }
+    
+    // 2. BUY PRESSURE (0-25 pts)
+    // More buyers than sellers = demand building
+    const totalTxns1h = buys1h + sells1h;
+    if (totalTxns1h > 0) {
+      const buyRatio = buys1h / totalTxns1h;
+      if (buyRatio > 0.5) score += Math.min(25, (buyRatio - 0.5) * 50); // 0-25 pts for 50-100% buy ratio
+    } else if (buys24 + sells24 > 0) {
+      const buyRatio24 = buys24 / (buys24 + sells24);
+      if (buyRatio24 > 0.5) score += Math.min(15, (buyRatio24 - 0.5) * 30);
+    }
+    
+    // 3. AGE BONUS (0-20 pts)
+    // Younger tokens that already passed the filters are rare finds
+    let ageHours = 999;
+    if (best.pairCreatedAt) {
+      ageHours = (Date.now() - best.pairCreatedAt) / 3600000;
+    }
+    if (ageHours < 1) score += 20;        // Under 1 hour
+    else if (ageHours < 6) score += 16;    // Under 6 hours
+    else if (ageHours < 24) score += 12;   // Under 1 day
+    else if (ageHours < 72) score += 8;    // Under 3 days
+    else if (ageHours < 168) score += 4;   // Under 1 week
+    
+    // 4. PRICE ACCELERATION (0-20 pts)
+    // Multiple timeframes green = sustained momentum
+    let greenCount = 0;
+    if (p5m > 0) greenCount++;
+    if (p1h > 0) greenCount++;
+    if (p6h > 0) greenCount++;
+    if (p24h > 0) greenCount++;
+    score += greenCount * 5; // 5 pts per green timeframe
+    
+    // 5. LIQUIDITY HEALTH (0-5 pts)
+    // Healthy liq/mcap ratio means less rug risk
+    if (mcap > 0) {
+      const liqRatio = liq / mcap;
+      if (liqRatio >= 0.05) score += 5;      // 5%+ liq/mcap = healthy
+      else if (liqRatio >= 0.02) score += 3;  // 2-5% = okay
+      else score += 1;                         // Under 2% = risky
+    }
+    
+    // ===== END ALGORITHM =====
     
     tokens.push({
       sym, name: best.baseToken.name || sym, img,
       price: best.priceUsd ? parseFloat(best.priceUsd) : 0,
-      mcap, vol, liq: best.liquidity?.usd || 0,
-      p5m: pc.m5 ? parseFloat(pc.m5) : 0,
-      p1h: pc.h1 ? parseFloat(pc.h1) : 0,
-      p6h: pc.h6 ? parseFloat(pc.h6) : 0,
-      p24h: pc.h24 ? parseFloat(pc.h24) : 0,
+      mcap, vol, liq,
+      p5m, p1h, p6h, p24h,
       age, txn: txns,
       net: chainMap[best.chainId] || 'solana',
       dex: best.dexId || 'raydium',
