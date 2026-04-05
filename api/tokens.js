@@ -80,14 +80,13 @@ async function searchToken(query) {
 // ===== MAIN FETCH =====
 async function fetchAllTokens() {
   const allAddresses = new Set();
-  const geckoTokens = [];
   
   // STEP 1: GeckoTerminal - trending pools from all chains (organic trending)
   const chains = ['solana', 'eth', 'base', 'bsc'];
   
   for (const chain of chains) {
-    // Trending pools - pages 1-3
-    for (let page = 1; page <= 3; page++) {
+    // Trending pools - pages 1-5 (more pages = more tokens)
+    for (let page = 1; page <= 5; page++) {
       try {
         const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/${chain}/trending_pools?page=${page}`);
         if (r.status === 429) {
@@ -104,23 +103,26 @@ async function fetchAllTokens() {
           }
         }
       } catch (e) {}
-      await sleep(200); // Small delay between calls
+      await sleep(150);
     }
     
-    // New pools - page 1
-    try {
-      const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/${chain}/new_pools?page=1`);
-      if (r.ok) {
-        const d = await r.json();
-        if (d && d.data) {
-          for (const pool of d.data) {
-            const addr = extractTokenAddress(pool);
-            if (addr) allAddresses.add(addr);
+    // New pools - pages 1-3 (catch early movers)
+    for (let page = 1; page <= 3; page++) {
+      try {
+        const r = await fetch(`https://api.geckoterminal.com/api/v2/networks/${chain}/new_pools?page=${page}`);
+        if (r.status === 429) { await sleep(2000); continue; }
+        if (r.ok) {
+          const d = await r.json();
+          if (d && d.data) {
+            for (const pool of d.data) {
+              const addr = extractTokenAddress(pool);
+              if (addr) allAddresses.add(addr);
+            }
           }
         }
-      }
-    } catch (e) {}
-    await sleep(200);
+      } catch (e) {}
+      await sleep(150);
+    }
   }
   
   console.log(`GeckoTerminal: ${allAddresses.size} unique token addresses`);
@@ -138,8 +140,25 @@ async function fetchAllTokens() {
     }
   } catch (e) {}
   
-  // STEP 3: DexScreener search for meme terms
-  const memeTerms = ['pepe', 'doge', 'cat', 'trump', 'ai', 'meme', 'frog', 'dog', 'bonk', 'wif', 'shib', 'floki', 'neiro', 'popcat', 'brett', 'goat', 'pnut', 'elon', 'wojak', 'chad'];
+  // STEP 3: DexScreener boosted tokens (paid but often active)
+  try {
+    const r = await fetch('https://api.dexscreener.com/token-boosts/top/v1');
+    if (r.ok) {
+      const d = await r.json();
+      if (Array.isArray(d)) {
+        for (const t of d) {
+          if (t.tokenAddress) allAddresses.add(t.tokenAddress);
+        }
+      }
+    }
+  } catch (e) {}
+  
+  // STEP 4: DexScreener search for meme/trending terms (top 10 per term)
+  const memeTerms = [
+    'pepe', 'doge', 'cat', 'trump', 'ai', 'meme', 'frog', 'dog', 'bonk', 'wif',
+    'shib', 'floki', 'neiro', 'popcat', 'brett', 'goat', 'pnut', 'elon', 'wojak', 'chad',
+    'sol', 'moon', 'pump', 'baby', 'inu', 'king', 'giga', 'based', 'degen', 'turbo'
+  ];
   
   for (const term of memeTerms) {
     try {
@@ -148,7 +167,7 @@ async function fetchAllTokens() {
         const d = await r.json();
         if (d && d.pairs) {
           const sorted = d.pairs.sort((a, b) => ((b.volume?.h24 || 0) - (a.volume?.h24 || 0)));
-          for (let i = 0; i < Math.min(5, sorted.length); i++) {
+          for (let i = 0; i < Math.min(10, sorted.length); i++) {
             if (sorted[i].baseToken?.address) {
               allAddresses.add(sorted[i].baseToken.address);
             }
