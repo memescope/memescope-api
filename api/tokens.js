@@ -307,3 +307,7 @@ function parseDexPairs(pairs) {
   tokens.sort((a, b) => b._score - a._score);
   return tokens;
 }
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
