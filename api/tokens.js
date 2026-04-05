@@ -51,48 +51,54 @@ async function searchToken(query) {
 
 async function fetchAllTokens() {
   const allAddresses = new Set();
-  
-  // ALL requests fire at the same time - no waiting
-  const allPromises = [];
   const chains = ['solana', 'eth', 'base', 'bsc'];
   
-  // GeckoTerminal trending (3 pages x 4 chains) + new pools (1 page x 4 chains)
+  // GeckoTerminal - staggered to avoid 429 rate limits (30/min)
+  // Fetch one chain at a time, but pages within a chain in parallel
   for (const chain of chains) {
+    const geckoUrls = [];
     for (let p = 1; p <= 3; p++) {
-      allPromises.push({ type: 'gecko', promise: safeFetch(`https://api.geckoterminal.com/api/v2/networks/${chain}/trending_pools?page=${p}`) });
+      geckoUrls.push(`https://api.geckoterminal.com/api/v2/networks/${chain}/trending_pools?page=${p}`);
     }
-    allPromises.push({ type: 'gecko', promise: safeFetch(`https://api.geckoterminal.com/api/v2/networks/${chain}/new_pools?page=1`) });
+    geckoUrls.push(`https://api.geckoterminal.com/api/v2/networks/${chain}/new_pools?page=1`);
+    
+    const geckoResults = await Promise.all(geckoUrls.map(u => safeFetch(u)));
+    for (const d of geckoResults) {
+      if (d?.data) {
+        for (const pool of d.data) {
+          const addr = extractTokenAddress(pool);
+          if (addr) allAddresses.add(addr);
+        }
+      }
+    }
+    await sleep(500); // Small gap between chains to stay under rate limit
   }
   
-  // DexScreener profiles + boosted
-  allPromises.push({ type: 'dexList', promise: safeFetch('https://api.dexscreener.com/token-profiles/latest/v1') });
-  allPromises.push({ type: 'dexList', promise: safeFetch('https://api.dexscreener.com/token-boosts/top/v1') });
+  console.log(`GeckoTerminal: ${allAddresses.size} addresses`);
   
-  // DexScreener search terms
+  // DexScreener - all parallel (300/min rate limit, no issue)
+  const dexPromises = [];
+  
+  // Profiles + boosted
+  dexPromises.push({ type: 'list', promise: safeFetch('https://api.dexscreener.com/token-profiles/latest/v1') });
+  dexPromises.push({ type: 'list', promise: safeFetch('https://api.dexscreener.com/token-boosts/top/v1') });
+  
+  // Search terms
   const terms = ['pepe','doge','cat','trump','ai','meme','frog','dog','bonk','wif','shib','floki','popcat','brett','goat','pnut','moon','pump','inu','giga','degen','turbo'];
   for (const term of terms) {
-    allPromises.push({ type: 'dexSearch', promise: safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + term) });
+    dexPromises.push({ type: 'search', promise: safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + term) });
   }
   
-  // Fire everything at once
-  const results = await Promise.all(allPromises.map(p => p.promise));
+  const dexResults = await Promise.all(dexPromises.map(p => p.promise));
   
-  // Process results
-  for (let i = 0; i < allPromises.length; i++) {
-    const type = allPromises[i].type;
-    const d = results[i];
+  for (let i = 0; i < dexPromises.length; i++) {
+    const type = dexPromises[i].type;
+    const d = dexResults[i];
     if (!d) continue;
     
-    if (type === 'gecko' && d.data) {
-      for (const pool of d.data) {
-        const addr = extractTokenAddress(pool);
-        if (addr) allAddresses.add(addr);
-      }
-    } else if (type === 'dexList' && Array.isArray(d)) {
-      for (const t of d) {
-        if (t.tokenAddress) allAddresses.add(t.tokenAddress);
-      }
-    } else if (type === 'dexSearch' && d.pairs) {
+    if (type === 'list' && Array.isArray(d)) {
+      for (const t of d) { if (t.tokenAddress) allAddresses.add(t.tokenAddress); }
+    } else if (type === 'search' && d.pairs) {
       const sorted = d.pairs.sort((a, b) => ((b.volume?.h24 || 0) - (a.volume?.h24 || 0)));
       for (let j = 0; j < Math.min(10, sorted.length); j++) {
         if (sorted[j].baseToken?.address) allAddresses.add(sorted[j].baseToken.address);
