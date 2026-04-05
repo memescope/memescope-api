@@ -200,33 +200,97 @@ function parseDexPairs(pairs) {
     const p24h = pc.h24 ? parseFloat(pc.h24) : 0;
     
     // HARD FILTERS
-    if (mcap < 50000 || liq < 20000) continue;
+    if (!mcap || mcap < 50000) continue;
+    if (!liq || liq < 20000) continue;
     
-    // MEMESCOPE DISCOVERY ALGORITHM
+    // ===== MEMESCOPE DISCOVERY ALGORITHM v2 =====
     let score = 0;
     
-    // 1. Volume momentum (0-30)
-    if (vol > 0) score += Math.min(30, (vol1h / (vol / 24)) * 5);
+    // 1. VOLUME VELOCITY (0-30 pts) — THE #1 FACTOR
+    // How much faster is current volume vs the daily average?
+    // A spike from $10K/hr average to $100K/hr = 10x = max score
+    if (vol > 0) {
+      const hourlyAvg = vol / 24;
+      const velocity = hourlyAvg > 0 ? vol1h / hourlyAvg : 0;
+      score += Math.min(30, velocity * 3);
+    }
     
-    // 2. Buy pressure (0-25)
+    // 2. POOL TURNOVER (0-25 pts) — OUR EDGE OVER DEXSCREENER
+    // Volume relative to liquidity. High turnover = intense activity in the pool
+    // 1x turnover = decent, 5x+ = on fire
+    if (liq > 0) {
+      const turnover = vol / liq;
+      score += Math.min(25, turnover * 3);
+    }
+    
+    // 3. BUY PRESSURE (0-20 pts)
+    // More buyers than sellers = demand building
     const t1h = buys1h + sells1h;
-    if (t1h > 0) { const br = buys1h / t1h; if (br > 0.5) score += Math.min(25, (br - 0.5) * 50); }
-    else if (buys24 + sells24 > 0) { const br = buys24 / (buys24 + sells24); if (br > 0.5) score += Math.min(15, (br - 0.5) * 30); }
+    if (t1h > 0) {
+      const br = buys1h / t1h;
+      if (br > 0.5) score += Math.min(20, (br - 0.5) * 40);
+    } else if (buys24 + sells24 > 0) {
+      const br = buys24 / (buys24 + sells24);
+      if (br > 0.5) score += Math.min(12, (br - 0.5) * 24);
+    }
     
-    // 3. Age bonus (0-20)
-    if (ageHours < 1) score += 20;
-    else if (ageHours < 6) score += 16;
-    else if (ageHours < 24) score += 12;
-    else if (ageHours < 72) score += 8;
-    else if (ageHours < 168) score += 4;
+    // 4. ANTI-BOT DETECTION (penalty: -10 to 0 pts)
+    // If volume is high but transaction count is low, it's likely wash trading
+    // Real organic trading = many small transactions, not few huge ones
+    if (txns > 0 && vol > 0) {
+      const avgTxSize = vol / txns;
+      // If average transaction > $5000, suspicious for memecoins
+      if (avgTxSize > 10000) score -= 10;
+      else if (avgTxSize > 5000) score -= 5;
+      // Bonus for high transaction count (organic activity)
+      if (txns > 5000) score += 5;
+      else if (txns > 1000) score += 3;
+    }
     
-    // 4. Price acceleration (0-20)
+    // 5. TRANSACTION DENSITY (0-15 pts)
+    // Lots of transactions in the last hour = hot right now
+    if (t1h > 0) {
+      if (t1h > 500) score += 15;
+      else if (t1h > 200) score += 10;
+      else if (t1h > 50) score += 5;
+    }
+    
+    // 6. PRICE ACCELERATION (0-15 pts)
+    // Multiple timeframes green = sustained momentum, not just a spike
     let gc = 0;
-    if (p5m > 0) gc++; if (p1h > 0) gc++; if (p6h > 0) gc++; if (p24h > 0) gc++;
-    score += gc * 5;
+    if (p5m > 0) gc++;
+    if (p1h > 0) gc++;
+    if (p6h > 0) gc++;
+    if (p24h > 0) gc++;
+    score += gc * 3;
+    // Extra bonus if ALL timeframes are green
+    if (gc === 4) score += 3;
     
-    // 5. Liquidity health (0-5)
-    if (mcap > 0) { const lr = liq / mcap; score += lr >= 0.05 ? 5 : lr >= 0.02 ? 3 : 1; }
+    // 7. AGE BONUS (0-10 pts)
+    // Newer tokens that pass all filters are rare finds
+    if (ageHours < 1) score += 10;
+    else if (ageHours < 6) score += 8;
+    else if (ageHours < 24) score += 6;
+    else if (ageHours < 72) score += 4;
+    else if (ageHours < 168) score += 2;
+    
+    // 8. LIQUIDITY HEALTH (0-5 pts)
+    // Good liq/mcap ratio = less rug risk, more stable
+    if (mcap > 0) {
+      const lr = liq / mcap;
+      if (lr >= 0.10) score += 5;       // 10%+ = very healthy
+      else if (lr >= 0.05) score += 4;   // 5-10% = healthy
+      else if (lr >= 0.02) score += 2;   // 2-5% = okay
+      // Under 2% = no bonus, risky
+    }
+    
+    // 9. VERIFIED INFO BOOST (0-5 pts)
+    // Tokens with real socials/website are more trustworthy
+    if (website) score += 2;
+    if (twitter) score += 2;
+    if (best.info?.imageUrl) score += 1;
+    
+    // ===== END ALGORITHM =====
     
     tokens.push({
       sym, name: best.baseToken.name || sym, img,
