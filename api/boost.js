@@ -1,19 +1,19 @@
-// api/boost.js — Deploy to memescope-api repo on Vercel
-// Handles POST /api/boost (submit boost) and GET /api/boost?ca=xxx (check boost)
+// api/boost.js — Boost system for MemeScope
+// GET /api/boost — list all active boosts
+// GET /api/boost?ca=xxx — check specific token
+// POST /api/boost — submit a boost (txSignature, ca, tier, solAmount)
 
 const PAYMENT_WALLET = '82p2EEAB5jobWxVYjGN4aZm84ZGcK3TSzpHqTXv5kvMg';
 const SOLANA_RPC = 'https://api.mainnet-beta.solana.com';
-const BOOST_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
+const BOOST_DURATION_MS = 24 * 60 * 60 * 1000;
 
-// Tier config
 const TIERS = {
-  20:  { usd: 99,  label: '⚡20' },
-  50:  { usd: 199, label: '⚡50' },
-  100: { usd: 399, label: '⚡100' },
-  500: { usd: 999, label: '⚡500' },
+  20:  { usd: 99 },
+  50:  { usd: 199 },
+  100: { usd: 399 },
+  500: { usd: 999 },
 };
 
-// In-memory store (resets on cold start)
 const boostStore = {};
 
 function cleanExpired() {
@@ -39,23 +39,18 @@ async function verifyTransaction(txSignature, expectedSolAmount) {
     });
     const data = await resp.json();
     if (!data.result) return { valid: false, reason: 'Transaction not found' };
-    const tx = data.result;
-    if (tx.meta && tx.meta.err) return { valid: false, reason: 'Transaction failed on-chain' };
-    const instructions = tx.transaction?.message?.instructions || [];
-    let transferFound = false;
-    let transferAmount = 0;
+    if (data.result.meta && data.result.meta.err) return { valid: false, reason: 'Transaction failed' };
+    const instructions = data.result.transaction?.message?.instructions || [];
     for (const ix of instructions) {
       if (ix.parsed && ix.parsed.type === 'transfer' && ix.program === 'system') {
         if (ix.parsed.info.destination === PAYMENT_WALLET) {
-          transferFound = true;
-          transferAmount = ix.parsed.info.lamports / 1e9;
-          break;
+          const amount = ix.parsed.info.lamports / 1e9;
+          if (amount >= expectedSolAmount * 0.98) return { valid: true, amount };
+          return { valid: false, reason: 'Insufficient amount' };
         }
       }
     }
-    if (!transferFound) return { valid: false, reason: 'No transfer to payment wallet found' };
-    if (transferAmount < expectedSolAmount * 0.98) return { valid: false, reason: 'Insufficient amount' };
-    return { valid: true, amount: transferAmount };
+    return { valid: false, reason: 'No transfer to payment wallet' };
   } catch (err) {
     return { valid: false, reason: 'RPC error: ' + err.message };
   }
@@ -68,8 +63,7 @@ function isTxUsed(txSignature) {
   return false;
 }
 
-module.exports = async function handler(req, res) {
-  // CORS
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -94,11 +88,10 @@ module.exports = async function handler(req, res) {
       }
       const boost = boostStore[ca];
       if (!boost || boost.expiration < Date.now()) {
-        return res.status(200).json({ boosted: false, ca: ca });
+        return res.status(200).json({ boosted: false, ca });
       }
       return res.status(200).json({
-        boosted: true,
-        ca: ca,
+        boosted: true, ca,
         boostCount: boost.boostCount,
         expiration: boost.expiration,
         remainingMs: boost.expiration - Date.now(),
@@ -108,39 +101,33 @@ module.exports = async function handler(req, res) {
 
     if (req.method === 'POST') {
       const body = req.body || {};
-      const txSignature = body.txSignature;
-      const ca = body.ca;
-      const tier = body.tier;
-      const solAmount = body.solAmount;
-
-      if (!txSignature || !ca || !tier) {
-        return res.status(400).json({ error: 'Missing required fields: txSignature, ca, tier' });
+      if (!body.txSignature || !body.ca || !body.tier) {
+        return res.status(400).json({ error: 'Missing fields: txSignature, ca, tier' });
       }
-      const tierNum = parseInt(tier);
+      const tierNum = parseInt(body.tier);
       if (!TIERS[tierNum]) {
         return res.status(400).json({ error: 'Invalid tier' });
       }
-      if (isTxUsed(txSignature)) {
+      if (isTxUsed(body.txSignature)) {
         return res.status(400).json({ error: 'Transaction already used' });
       }
-      const verification = await verifyTransaction(txSignature, solAmount || 0);
+      const verification = await verifyTransaction(body.txSignature, body.solAmount || 0);
       if (!verification.valid) {
         return res.status(400).json({ error: 'Verification failed', reason: verification.reason });
       }
       const now = Date.now();
-      const existing = boostStore[ca];
+      const existing = boostStore[body.ca];
       const newBoostCount = (existing ? existing.boostCount : 0) + tierNum;
       const newExpiration = Math.max(existing ? existing.expiration : 0, now + BOOST_DURATION_MS);
-      boostStore[ca] = {
+      boostStore[body.ca] = {
         boostCount: newBoostCount,
         expiration: newExpiration,
         timestamp: now,
         tier: tierNum,
-        txSignature: txSignature,
+        txSignature: body.txSignature,
       };
       return res.status(200).json({
-        success: true,
-        ca: ca,
+        success: true, ca: body.ca,
         boostCount: newBoostCount,
         expiration: newExpiration,
         tier: tierNum,
@@ -149,6 +136,6 @@ module.exports = async function handler(req, res) {
 
     return res.status(405).json({ error: 'Method not allowed' });
   } catch (err) {
-    return res.status(500).json({ error: 'Internal server error', message: err.message });
+    return res.status(500).json({ error: 'Server error', message: err.message });
   }
-};
+}
