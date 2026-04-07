@@ -1,313 +1,235 @@
-// MemeScope API v2 - FAST
-// All fetches run in parallel, Vercel CDN caching for instant responses
+// api/tokens.js — MemeScope Token API
+// Pulls from GeckoTerminal trending + new pools (7 chains)
+// + DexScreener profiles/boosted/meme search terms
+// Batch enriches via DexScreener, scores, filters, caches
 
-let cache = { data: null, timestamp: 0 };
-const CACHE_TTL = 120000;
+const CACHE_TTL = 120000; // 2 minutes
+let cache = { data: null, ts: 0 };
+
+// === 7 CHAINS ===
+const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'tron', 'polygon_pos', 'arbitrum', 'abstract'];
+
+const MEME_SEARCH_TERMS = [
+  'pepe','doge','shib','bonk','floki','wojak','chad','meme','inu','cat',
+  'frog','moon','elon','trump','ai','grok','brett','toshi','degen','based',
+  'pnut','goat'
+];
+
+const HARD_FILTERS = {
+  minMcap: 50000,
+  minLiq: 20000,
+};
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function safeFetch(url, opts) {
+  try {
+    const r = await fetch(url, opts || {});
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+// Score a token
+function scoreToken(t) {
+  let score = 0;
+  // Volume velocity
+  if (t.mcap > 0) score += Math.min(40, (t.vol / t.mcap) * 40);
+  // Price action
+  score += Math.min(15, Math.abs(t.p24h || 0) * 0.15);
+  score += Math.min(10, Math.abs(t.p1h || 0) * 0.2);
+  score += Math.min(8, Math.abs(t.p5m || 0) * 0.3);
+  // Transaction density
+  score += Math.min(15, (t.txn || 0) / 500);
+  // Liquidity health
+  if (t.liq > 100000) score += 8;
+  else if (t.liq > 50000) score += 5;
+  else if (t.liq > 20000) score += 2;
+  // Low mcap bonus
+  if (t.mcap < 500000) score += 10;
+  else if (t.mcap < 2000000) score += 5;
+  // Age bonus (newer = more interesting)
+  if (t.age && t.age.includes('m')) score += 8;
+  else if (t.age && t.age.includes('h')) score += 5;
+  else if (t.age && t.age.includes('d')) {
+    const days = parseInt(t.age);
+    if (days < 7) score += 3;
+  }
+  // Social/verified bonus
+  if (t.social > 50) score += 5;
+  if (t.website) score += 2;
+  if (t.twitter) score += 2;
+  return score;
+}
+
+function parseDexPair(p) {
+  const chainMap = {
+    'solana': 'solana',
+    'ethereum': 'eth',
+    'base': 'base',
+    'bsc': 'bsc',
+    'tron': 'tron',
+    'polygon_pos': 'polygon',
+    'arbitrum': 'arbitrum',
+    'abstract': 'abstract',
+  };
+  const net = chainMap[p.chainId] || p.chainId || 'solana';
+  const price = p.priceUsd ? parseFloat(p.priceUsd) : 0;
+  const mcap = p.marketCap || p.fdv || 0;
+  const vol = p.volume ? (p.volume.h24 || 0) : 0;
+  const liq = p.liquidity ? (p.liquidity.usd || 0) : 0;
+  const pc = p.priceChange || {};
+
+  let age = '??';
+  if (p.pairCreatedAt) {
+    const ageHrs = (Date.now() - p.pairCreatedAt) / 3600000;
+    if (ageHrs < 1) age = Math.round(ageHrs * 60) + 'm';
+    else if (ageHrs < 24) age = Math.round(ageHrs) + 'h';
+    else if (ageHrs < 720) age = Math.round(ageHrs / 24) + 'd';
+    else if (ageHrs < 8760) age = Math.round(ageHrs / 720) + 'mo';
+    else age = Math.round(ageHrs / 8760) + 'y';
+  }
+
+  let txns = 0;
+  if (p.txns && p.txns.h24) txns = (p.txns.h24.buys || 0) + (p.txns.h24.sells || 0);
+
+  let tokenImg = '';
+  if (p.info && p.info.imageUrl) tokenImg = p.info.imageUrl;
+
+  return {
+    sym: p.baseToken ? p.baseToken.symbol.toUpperCase() : '???',
+    name: p.baseToken ? p.baseToken.name : 'Unknown',
+    img: tokenImg,
+    price, mcap, vol, liq,
+    p5m: pc.m5 ? parseFloat(pc.m5) : 0,
+    p1h: pc.h1 ? parseFloat(pc.h1) : 0,
+    p6h: pc.h6 ? parseFloat(pc.h6) : 0,
+    p24h: pc.h24 ? parseFloat(pc.h24) : 0,
+    age, txn: txns, net, 
+    dex: p.dexId || '',
+    social: 0, boosted: false,
+    website: p.info?.websites?.[0]?.url || '',
+    twitter: p.info?.socials?.find(s => s.type === 'twitter')?.url || '',
+    telegram: p.info?.socials?.find(s => s.type === 'telegram')?.url || '',
+    ca: p.baseToken?.address || '',
+  };
+}
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=300');
-  
+  res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=60');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const searchQuery = req.query.search || req.query.q;
-  if (searchQuery) {
-    try {
-      const results = await searchToken(searchQuery);
-      return res.status(200).json({ tokens: results, source: 'live_search' });
-    } catch (e) {
-      return res.status(500).json({ error: e.message });
+  // Search mode
+  const search = req.query?.search;
+  if (search) {
+    const data = await safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(search));
+    if (data && data.pairs) {
+      const results = data.pairs.slice(0, 20).map(parseDexPair).filter(t => t.mcap >= 1000);
+      return res.status(200).json({ tokens: results, search: true });
     }
+    return res.status(200).json({ tokens: [], search: true });
   }
 
-  const now = Date.now();
-  if (cache.data && (now - cache.timestamp) < CACHE_TTL) {
-    return res.status(200).json({ tokens: cache.data, cached: true, count: cache.data.length });
+  // Check cache
+  if (cache.data && (Date.now() - cache.ts < CACHE_TTL)) {
+    return res.status(200).json({ tokens: cache.data, cached: true });
   }
 
   try {
-    const tokens = await fetchAllTokens();
-    cache = { data: tokens, timestamp: Date.now() };
-    return res.status(200).json({ tokens, cached: false, count: tokens.length });
-  } catch (e) {
-    if (cache.data) return res.status(200).json({ tokens: cache.data, cached: true, stale: true });
-    return res.status(500).json({ error: e.message });
-  }
-}
+    const seenCAs = new Set();
+    const allTokens = [];
 
-async function searchToken(query) {
-  const isCA = query.length > 30;
-  const url = isCA
-    ? 'https://api.dexscreener.com/latest/dex/tokens/' + query
-    : 'https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(query);
-  const r = await fetch(url);
-  if (!r.ok) return [];
-  const d = await r.json();
-  if (!d?.pairs) return [];
-  return parseDexPairs(d.pairs.slice(0, 30));
-}
-
-async function fetchAllTokens() {
-  const allAddresses = new Set();
-  const chains = ['solana', 'eth', 'base', 'bsc'];
-  
-  // GeckoTerminal - staggered to avoid 429 rate limits (30/min)
-  // Fetch one chain at a time, but pages within a chain in parallel
-  for (const chain of chains) {
-    const geckoUrls = [];
-    for (let p = 1; p <= 3; p++) {
-      geckoUrls.push(`https://api.geckoterminal.com/api/v2/networks/${chain}/trending_pools?page=${p}`);
+    function addToken(t) {
+      if (!t.ca || seenCAs.has(t.ca)) return;
+      if (t.mcap < HARD_FILTERS.minMcap || t.liq < HARD_FILTERS.minLiq) return;
+      seenCAs.add(t.ca);
+      allTokens.push(t);
     }
-    geckoUrls.push(`https://api.geckoterminal.com/api/v2/networks/${chain}/new_pools?page=1`);
-    
-    const geckoResults = await Promise.all(geckoUrls.map(u => safeFetch(u)));
-    for (const d of geckoResults) {
-      if (d?.data) {
-        for (const pool of d.data) {
-          const addr = extractTokenAddress(pool);
-          if (addr) allAddresses.add(addr);
+
+    // 1. GeckoTerminal trending pools (7 chains)
+    for (const chain of GECKO_CHAINS) {
+      const data = await safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/trending_pools?page=1', { headers: { 'Accept': 'application/json' } });
+      if (data?.data) {
+        for (const pool of data.data) {
+          const addr = pool.attributes?.address;
+          if (!addr) continue;
+          // Enrich via DexScreener
+          const ds = await safeFetch('https://api.dexscreener.com/latest/dex/pairs/' + chain + '/' + addr);
+          if (ds?.pairs?.[0]) addToken(parseDexPair(ds.pairs[0]));
         }
       }
+      await sleep(200);
     }
-    await sleep(500); // Small gap between chains to stay under rate limit
-  }
-  
-  console.log(`GeckoTerminal: ${allAddresses.size} addresses`);
-  
-  // DexScreener - all parallel (300/min rate limit, no issue)
-  const dexPromises = [];
-  
-  // Profiles + boosted
-  dexPromises.push({ type: 'list', promise: safeFetch('https://api.dexscreener.com/token-profiles/latest/v1') });
-  dexPromises.push({ type: 'list', promise: safeFetch('https://api.dexscreener.com/token-boosts/top/v1') });
-  
-  // Search terms
-  const terms = ['pepe','doge','cat','trump','ai','meme','frog','dog','bonk','wif','shib','floki','popcat','brett','goat','pnut','moon','pump','inu','giga','degen','turbo'];
-  for (const term of terms) {
-    dexPromises.push({ type: 'search', promise: safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + term) });
-  }
-  
-  const dexResults = await Promise.all(dexPromises.map(p => p.promise));
-  
-  for (let i = 0; i < dexPromises.length; i++) {
-    const type = dexPromises[i].type;
-    const d = dexResults[i];
-    if (!d) continue;
-    
-    if (type === 'list' && Array.isArray(d)) {
-      for (const t of d) { if (t.tokenAddress) allAddresses.add(t.tokenAddress); }
-    } else if (type === 'search' && d.pairs) {
-      const sorted = d.pairs.sort((a, b) => ((b.volume?.h24 || 0) - (a.volume?.h24 || 0)));
-      for (let j = 0; j < Math.min(10, sorted.length); j++) {
-        if (sorted[j].baseToken?.address) allAddresses.add(sorted[j].baseToken.address);
-      }
-    }
-  }
-  
-  console.log(`Discovery: ${allAddresses.size} unique addresses`);
-  
-  // Batch enrich via DexScreener - also parallel
-  const addressList = [...allAddresses];
-  const batchPromises = [];
-  for (let i = 0; i < addressList.length; i += 30) {
-    const chunk = addressList.slice(i, i + 30);
-    batchPromises.push(safeFetch('https://api.dexscreener.com/latest/dex/tokens/' + chunk.join(',')));
-  }
-  
-  const batchResults = await Promise.all(batchPromises);
-  const allPairs = [];
-  for (const d of batchResults) {
-    if (d?.pairs) allPairs.push(...d.pairs);
-  }
-  
-  console.log(`Enrichment: ${allPairs.length} pairs from ${batchPromises.length} batches`);
-  return parseDexPairs(allPairs);
-}
 
-async function safeFetch(url) {
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    return await r.json();
-  } catch (e) { return null; }
-}
-
-function extractTokenAddress(pool) {
-  if (pool.relationships?.base_token?.data?.id) {
-    return pool.relationships.base_token.data.id.split('_').pop() || '';
-  }
-  return '';
-}
-
-function parseDexPairs(pairs) {
-  const chainMap = { solana: 'solana', ethereum: 'eth', base: 'base', bsc: 'bsc' };
-  const byAddr = {};
-  
-  for (const p of pairs) {
-    if (!p.baseToken) continue;
-    const addr = p.baseToken.address.toLowerCase();
-    const liq = p.liquidity?.usd || 0;
-    if (!byAddr[addr] || liq > (byAddr[addr].liquidity?.usd || 0)) byAddr[addr] = p;
-  }
-  
-  const tokens = [];
-  const seenSyms = {};
-  
-  for (const addr in byAddr) {
-    const best = byAddr[addr];
-    if (!best.baseToken) continue;
-    const sym = best.baseToken.symbol.toUpperCase();
-    if (seenSyms[sym]) continue;
-    seenSyms[sym] = true;
-    
-    const pc = best.priceChange || {};
-    const mcap = Number(best.marketCap || best.fdv || 0);
-    const vol = Number(best.volume?.h24 || 0);
-    const vol1h = Number(best.volume?.h1 || 0);
-    const liq = Number(best.liquidity?.usd || 0);
-    const img = (best.info?.imageUrl) || `https://dd.dexscreener.com/ds-data/tokens/${best.chainId || 'solana'}/${best.baseToken.address}.png`;
-    
-    let website = '', twitter = '', telegram = '';
-    const ca = best.baseToken.address || '';
-    if (best.info) {
-      if (best.info.websites?.[0]) website = best.info.websites[0].url || '';
-      if (best.info.socials) {
-        for (const s of best.info.socials) {
-          if (s.type === 'twitter' && !twitter) twitter = s.url || '';
-          if (s.type === 'telegram' && !telegram) telegram = s.url || '';
+    // 2. GeckoTerminal new pools (7 chains)
+    for (const chain of GECKO_CHAINS) {
+      const data = await safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/new_pools?page=1', { headers: { 'Accept': 'application/json' } });
+      if (data?.data) {
+        for (const pool of data.data.slice(0, 10)) {
+          const addr = pool.attributes?.address;
+          if (!addr) continue;
+          const ds = await safeFetch('https://api.dexscreener.com/latest/dex/pairs/' + chain + '/' + addr);
+          if (ds?.pairs?.[0]) addToken(parseDexPair(ds.pairs[0]));
         }
       }
+      await sleep(200);
     }
-    
-    let age = '??', ageHours = 999;
-    if (best.pairCreatedAt) {
-      ageHours = (Date.now() - best.pairCreatedAt) / 3600000;
-      if (ageHours < 1) age = Math.round(ageHours * 60) + 'm';
-      else if (ageHours < 24) age = Math.round(ageHours) + 'h';
-      else if (ageHours < 720) age = Math.round(ageHours / 24) + 'd';
-      else age = Math.round(ageHours / 720) + 'mo';
-    }
-    
-    let txns = 0, buys24 = 0, sells24 = 0, buys1h = 0, sells1h = 0;
-    if (best.txns?.h24) { buys24 = best.txns.h24.buys || 0; sells24 = best.txns.h24.sells || 0; txns = buys24 + sells24; }
-    if (best.txns?.h1) { buys1h = best.txns.h1.buys || 0; sells1h = best.txns.h1.sells || 0; }
-    
-    const p5m = pc.m5 ? parseFloat(pc.m5) : 0;
-    const p1h = pc.h1 ? parseFloat(pc.h1) : 0;
-    const p6h = pc.h6 ? parseFloat(pc.h6) : 0;
-    const p24h = pc.h24 ? parseFloat(pc.h24) : 0;
-    
-    // HARD FILTERS — absolutely no exceptions
-    const mcapNum = Number(mcap);
-    const liqNum = Number(liq);
-    if (isNaN(mcapNum) || mcapNum < 50000) continue;
-    if (isNaN(liqNum) || liqNum < 20000) continue;
-    
-    // ===== MEMESCOPE DISCOVERY ALGORITHM v2 =====
-    let score = 0;
-    
-    // 1. VOLUME VELOCITY (0-30 pts) — THE #1 FACTOR
-    // How much faster is current volume vs the daily average?
-    // A spike from $10K/hr average to $100K/hr = 10x = max score
-    if (vol > 0) {
-      const hourlyAvg = vol / 24;
-      const velocity = hourlyAvg > 0 ? vol1h / hourlyAvg : 0;
-      score += Math.min(30, velocity * 3);
-    }
-    
-    // 2. POOL TURNOVER (0-25 pts) — OUR EDGE OVER DEXSCREENER
-    // Volume relative to liquidity. High turnover = intense activity in the pool
-    // 1x turnover = decent, 5x+ = on fire
-    if (liq > 0) {
-      const turnover = vol / liq;
-      score += Math.min(25, turnover * 3);
-    }
-    
-    // 3. BUY PRESSURE (0-20 pts)
-    // More buyers than sellers = demand building
-    const t1h = buys1h + sells1h;
-    if (t1h > 0) {
-      const br = buys1h / t1h;
-      if (br > 0.5) score += Math.min(20, (br - 0.5) * 40);
-    } else if (buys24 + sells24 > 0) {
-      const br = buys24 / (buys24 + sells24);
-      if (br > 0.5) score += Math.min(12, (br - 0.5) * 24);
-    }
-    
-    // 4. ANTI-BOT DETECTION (penalty: -10 to 0 pts)
-    // If volume is high but transaction count is low, it's likely wash trading
-    // Real organic trading = many small transactions, not few huge ones
-    if (txns > 0 && vol > 0) {
-      const avgTxSize = vol / txns;
-      // If average transaction > $5000, suspicious for memecoins
-      if (avgTxSize > 10000) score -= 10;
-      else if (avgTxSize > 5000) score -= 5;
-      // Bonus for high transaction count (organic activity)
-      if (txns > 5000) score += 5;
-      else if (txns > 1000) score += 3;
-    }
-    
-    // 5. TRANSACTION DENSITY (0-15 pts)
-    // Lots of transactions in the last hour = hot right now
-    if (t1h > 0) {
-      if (t1h > 500) score += 15;
-      else if (t1h > 200) score += 10;
-      else if (t1h > 50) score += 5;
-    }
-    
-    // 6. PRICE ACCELERATION (0-15 pts)
-    // Multiple timeframes green = sustained momentum, not just a spike
-    let gc = 0;
-    if (p5m > 0) gc++;
-    if (p1h > 0) gc++;
-    if (p6h > 0) gc++;
-    if (p24h > 0) gc++;
-    score += gc * 3;
-    // Extra bonus if ALL timeframes are green
-    if (gc === 4) score += 3;
-    
-    // 7. AGE BONUS (0-10 pts)
-    // Newer tokens that pass all filters are rare finds
-    if (ageHours < 1) score += 10;
-    else if (ageHours < 6) score += 8;
-    else if (ageHours < 24) score += 6;
-    else if (ageHours < 72) score += 4;
-    else if (ageHours < 168) score += 2;
-    
-    // 8. LIQUIDITY HEALTH (0-5 pts)
-    // Good liq/mcap ratio = less rug risk, more stable
-    if (mcap > 0) {
-      const lr = liq / mcap;
-      if (lr >= 0.10) score += 5;       // 10%+ = very healthy
-      else if (lr >= 0.05) score += 4;   // 5-10% = healthy
-      else if (lr >= 0.02) score += 2;   // 2-5% = okay
-      // Under 2% = no bonus, risky
-    }
-    
-    // 9. VERIFIED INFO BOOST (0-5 pts)
-    // Tokens with real socials/website are more trustworthy
-    if (website) score += 2;
-    if (twitter) score += 2;
-    if (best.info?.imageUrl) score += 1;
-    
-    // ===== END ALGORITHM =====
-    
-    tokens.push({
-      sym, name: best.baseToken.name || sym, img,
-      price: best.priceUsd ? parseFloat(best.priceUsd) : 0,
-      mcap, vol, liq, p5m, p1h, p6h, p24h,
-      age, txn: txns, net: chainMap[best.chainId] || 'solana',
-      dex: best.dexId || 'raydium', social: Math.floor(Math.random() * 100),
-      boosted: false, _score: score, website, twitter, telegram, ca
-    });
-  }
-  
-  tokens.sort((a, b) => b._score - a._score);
-  return tokens;
-}
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+    // 3. DexScreener token profiles
+    const profiles = await safeFetch('https://api.dexscreener.com/token-profiles/latest/v1');
+    if (profiles) {
+      const addrs = profiles.slice(0, 30).map(p => p.tokenAddress).filter(Boolean);
+      for (let i = 0; i < addrs.length; i += 5) {
+        const batch = addrs.slice(i, i + 5);
+        for (const addr of batch) {
+          const ds = await safeFetch('https://api.dexscreener.com/latest/dex/tokens/' + addr);
+          if (ds?.pairs?.[0]) addToken(parseDexPair(ds.pairs[0]));
+        }
+        await sleep(200);
+      }
+    }
+
+    // 4. DexScreener boosted tokens
+    const boosted = await safeFetch('https://api.dexscreener.com/token-boosts/latest/v1');
+    if (boosted) {
+      const addrs = boosted.slice(0, 20).map(p => p.tokenAddress).filter(Boolean);
+      for (const addr of addrs) {
+        const ds = await safeFetch('https://api.dexscreener.com/latest/dex/tokens/' + addr);
+        if (ds?.pairs?.[0]) {
+          const t = parseDexPair(ds.pairs[0]);
+          t.boosted = true;
+          addToken(t);
+        }
+      }
+      await sleep(200);
+    }
+
+    // 5. DexScreener meme search terms
+    for (const term of MEME_SEARCH_TERMS) {
+      const data = await safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + term);
+      if (data?.pairs) {
+        for (const p of data.pairs.slice(0, 5)) {
+          addToken(parseDexPair(p));
+        }
+      }
+      await sleep(150);
+    }
+
+    // Score and sort
+    for (const t of allTokens) {
+      t._score = scoreToken(t);
+      t.social = Math.min(100, Math.round(t._score));
+    }
+    allTokens.sort((a, b) => b._score - a._score);
+
+    cache = { data: allTokens, ts: Date.now() };
+    return res.status(200).json({ tokens: allTokens, cached: false });
+
+  } catch (err) {
+    if (cache.data) return res.status(200).json({ tokens: cache.data, cached: true, error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
 }
