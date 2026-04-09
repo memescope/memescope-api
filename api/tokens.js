@@ -4,12 +4,13 @@
 const CACHE_TTL = 120000;
 let cache = { data: null, ts: 0 };
 
-const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc'];
+const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'sui', 'tron'];
 
 const MEME_SEARCH_TERMS = [
   'pepe','doge','shib','bonk','floki','wojak','chad','meme','inu','cat',
   'frog','moon','elon','trump','ai','grok','brett','toshi','degen','based',
-  'pnut','goat'
+  'pnut','goat','virtual','anime','neiro','popcat','wif','render','pengu',
+  'bome','turbo','ponke','mog','dog','rocket','pork','sol','sui'
 ];
 
 async function safeFetch(url, opts) {
@@ -42,7 +43,7 @@ function scoreToken(t) {
 
 function parseDexPair(p) {
   const chainMap = {
-    'solana': 'solana', 'ethereum': 'eth', 'base': 'base', 'bsc': 'bsc',
+    'solana': 'solana', 'ethereum': 'eth', 'base': 'base', 'bsc': 'bsc', 'sui': 'sui', 'tron': 'tron',
   };
   const net = chainMap[p.chainId] || p.chainId || 'solana';
   const price = p.priceUsd ? parseFloat(p.priceUsd) : 0;
@@ -132,42 +133,67 @@ export default async function handler(req, res) {
 
     function addToken(t) {
       if (!t.ca || seenCAs.has(t.ca)) return;
-      if (t.mcap < 50000 || t.liq < 20000) return;
+      if (t.mcap < 10000 || t.liq < 5000) return;
       seenCAs.add(t.ca);
       allTokens.push(t);
     }
 
     // ========= ALL PHASES IN PARALLEL =========
 
-    // Phase 1: GeckoTerminal trending + new (all 8 chains, 16 requests parallel)
+    // Phase 1: GeckoTerminal trending + new + top pools pages 1-3
     const geckoPromises = GECKO_CHAINS.flatMap(chain => [
-      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/trending_pools?page=1', { headers: { 'Accept': 'application/json' } }),
-      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/new_pools?page=1', { headers: { 'Accept': 'application/json' } }),
+      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/trending_pools?page=1&include=base_token', { headers: { 'Accept': 'application/json' } }),
+      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/trending_pools?page=2&include=base_token', { headers: { 'Accept': 'application/json' } }),
+      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/trending_pools?page=3&include=base_token', { headers: { 'Accept': 'application/json' } }),
+      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/new_pools?page=1&include=base_token', { headers: { 'Accept': 'application/json' } }),
+      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/new_pools?page=2&include=base_token', { headers: { 'Accept': 'application/json' } }),
     ]);
 
     // Phase 2: DexScreener profiles + boosted
     const dsProfilePromise = safeFetch('https://api.dexscreener.com/token-profiles/latest/v1');
     const dsBoostedPromise = safeFetch('https://api.dexscreener.com/token-boosts/latest/v1');
 
-    // Phase 3: Meme search terms (all 22 in parallel)
+    // Phase 3: Meme search terms
     const searchPromises = MEME_SEARCH_TERMS.map(term =>
       safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + term)
     );
 
+    // Phase 4: CoinGecko trending (free, no key)
+    const cgTrendingPromise = safeFetch('https://api.coingecko.com/api/v3/search/trending');
+
+    // Phase 5: DexScreener pairs by chain (top pairs by volume)
+    const dsPairPromises = ['solana', 'ethereum', 'base', 'bsc', 'sui', 'tron'].map(chain =>
+      safeFetch('https://api.dexscreener.com/latest/dex/pairs/' + chain)
+    );
+
     // FIRE EVERYTHING AT ONCE
-    const [geckoResults, profiles, boosted, ...searchResults] = await Promise.all([
+    const [geckoResults, profiles, boosted, cgTrending, dsPairResults, ...searchResults] = await Promise.all([
       Promise.all(geckoPromises),
       dsProfilePromise,
       dsBoostedPromise,
+      cgTrendingPromise,
+      Promise.all(dsPairPromises),
       ...searchPromises,
     ]);
 
     // --- Process GeckoTerminal results ---
     const geckoAddresses = new Set();
+    const geckoImages = {}; // address -> image URL fallback
     for (const data of geckoResults) {
       if (!data?.data) continue;
-      for (const pool of data.data.slice(0, 15)) {
-        // Try to get token address from relationship
+      // Extract token images from included data
+      if (data.included) {
+        for (const inc of data.included) {
+          if (inc.type === 'token' && inc.attributes?.image_url) {
+            const tid = inc.id || '';
+            const uidx = tid.indexOf('_');
+            if (uidx > -1) {
+              geckoImages[tid.substring(uidx + 1)] = inc.attributes.image_url;
+            }
+          }
+        }
+      }
+      for (const pool of data.data.slice(0, 20)) {
         const tokenId = pool.relationships?.base_token?.data?.id || '';
         const underscoreIdx = tokenId.indexOf('_');
         if (underscoreIdx > -1) {
@@ -179,12 +205,12 @@ export default async function handler(req, res) {
     // --- Process DexScreener profiles/boosted ---
     const dsAddresses = new Set();
     if (profiles) {
-      for (const p of profiles.slice(0, 40)) {
+      for (const p of profiles.slice(0, 80)) {
         if (p.tokenAddress) dsAddresses.add(p.tokenAddress);
       }
     }
     if (boosted) {
-      for (const p of boosted.slice(0, 30)) {
+      for (const p of boosted.slice(0, 60)) {
         if (p.tokenAddress) {
           dsAddresses.add(p.tokenAddress);
           // NOT marking as boosted — only MemeScope's own boost system does that
@@ -195,21 +221,47 @@ export default async function handler(req, res) {
     // --- Process search results directly (they already have pair data) ---
     for (const data of searchResults) {
       if (data?.pairs) {
-        for (const p of data.pairs.slice(0, 5)) {
+        for (const p of data.pairs.slice(0, 10)) {
+          addToken(parseDexPair(p));
+        }
+      }
+    }
+
+    // --- Process CoinGecko trending coins ---
+    const cgAddresses = new Set();
+    if (cgTrending?.coins) {
+      for (const c of cgTrending.coins) {
+        const item = c.item;
+        if (item?.platforms) {
+          for (const [platform, addr] of Object.entries(item.platforms)) {
+            if (addr) cgAddresses.add(addr);
+          }
+        }
+      }
+    }
+
+    // --- Process DexScreener top pairs by chain ---
+    for (const data of dsPairResults) {
+      if (data?.pairs) {
+        for (const p of data.pairs.slice(0, 15)) {
           addToken(parseDexPair(p));
         }
       }
     }
 
     // --- Batch enrich GeckoTerminal + DexScreener addresses ---
-    const allAddresses = [...new Set([...geckoAddresses, ...dsAddresses])];
-    const enriched = await batchEnrich(allAddresses.slice(0, 120));
+    const allAddresses = [...new Set([...geckoAddresses, ...dsAddresses, ...cgAddresses])];
+    const enriched = await batchEnrich(allAddresses.slice(0, 250));
     for (const p of enriched) {
       addToken(parseDexPair(p));
     }
 
     // Score and sort
     for (const t of allTokens) {
+      // Fill in missing images from GeckoTerminal
+      if (!t.img && t.ca && geckoImages[t.ca]) {
+        t.img = geckoImages[t.ca];
+      }
       t._score = scoreToken(t);
       t.social = Math.min(100, Math.round(t._score));
     }
