@@ -4,7 +4,7 @@
 const CACHE_TTL = 120000;
 let cache = { data: null, ts: 0 };
 
-const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'sui', 'tron'];
+const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'sui-network', 'tron'];
 
 const MEME_SEARCH_TERMS = [
   'pepe','doge','shib','bonk','floki','wojak','chad','meme','inu','cat',
@@ -161,18 +161,19 @@ export default async function handler(req, res) {
     // Phase 4: CoinGecko trending (free, no key)
     const cgTrendingPromise = safeFetch('https://api.coingecko.com/api/v3/search/trending');
 
-    // Phase 5: DexScreener pairs by chain (top pairs by volume)
-    const dsPairPromises = ['solana', 'ethereum', 'base', 'bsc', 'sui', 'tron'].map(chain =>
-      safeFetch('https://api.dexscreener.com/latest/dex/pairs/' + chain)
-    );
+    // Phase 5: DexScreener chain-specific trending searches
+    const dsChainSearches = [
+      'sui meme', 'tron meme', 'solana new', 'base new',
+      'pump fun', 'sunpump', 'viral', 'nft', 'gaming'
+    ].map(q => safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(q)));
 
     // FIRE EVERYTHING AT ONCE
-    const [geckoResults, profiles, boosted, cgTrending, dsPairResults, ...searchResults] = await Promise.all([
+    const [geckoResults, profiles, boosted, cgTrending, dsChainResults, ...searchResults] = await Promise.all([
       Promise.all(geckoPromises),
       dsProfilePromise,
       dsBoostedPromise,
       cgTrendingPromise,
-      Promise.all(dsPairPromises),
+      Promise.all(dsChainSearches),
       ...searchPromises,
     ]);
 
@@ -240,8 +241,8 @@ export default async function handler(req, res) {
       }
     }
 
-    // --- Process DexScreener top pairs by chain ---
-    for (const data of dsPairResults) {
+    // --- Process DexScreener chain-specific searches ---
+    for (const data of dsChainResults) {
       if (data?.pairs) {
         for (const p of data.pairs.slice(0, 15)) {
           addToken(parseDexPair(p));
