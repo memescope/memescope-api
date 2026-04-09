@@ -163,7 +163,7 @@ export default async function handler(req, res) {
 
     // Phase 5: DexScreener chain-specific trending searches
     const dsChainSearches = [
-      'sui meme', 'tron meme', 'solana new', 'base new',
+      'cetus sui', 'turbos sui', 'bluefin sui', 'sundog tron',
       'pump fun', 'sunpump', 'viral', 'nft', 'gaming'
     ].map(q => safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(q)));
 
@@ -177,10 +177,11 @@ export default async function handler(req, res) {
       ...searchPromises,
     ]);
 
-    // --- Process GeckoTerminal results ---
+    // --- Process GeckoTerminal results (including dedicated Sui/Tron) ---
     const geckoAddresses = new Set();
     const geckoImages = {}; // address -> image URL fallback
-    for (const data of geckoResults) {
+    const allGeckoData = [...geckoResults];
+    for (const data of allGeckoData) {
       if (!data?.data) continue;
       // Extract token images from included data
       if (data.included) {
