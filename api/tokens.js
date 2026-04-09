@@ -134,6 +134,8 @@ export default async function handler(req, res) {
     function addToken(t) {
       if (!t.ca || seenCAs.has(t.ca)) return;
       if (t.mcap < 10000 || t.liq < 5000) return;
+      // Scam filter: if mcap is 50x+ the liquidity, it's likely fake/honeypot
+      if (t.liq > 0 && t.mcap / t.liq > 50) return;
       seenCAs.add(t.ca);
       allTokens.push(t);
     }
