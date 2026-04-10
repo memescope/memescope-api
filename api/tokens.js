@@ -141,9 +141,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Fetch tokens updated in the last 30 minutes, ordered by volume
+    // Fetch tokens updated in the last 4 hours, ordered by volume
     const supabaseResp = await fetch(
-      SUPABASE_URL + '/rest/v1/tokens?select=*&updated_at=gte.' + new Date(Date.now() - 30 * 60 * 1000).toISOString() + '&order=volume.desc&limit=1000',
+      SUPABASE_URL + '/rest/v1/tokens?select=*&updated_at=gte.' + new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString() + '&order=volume.desc&limit=1000',
       {
         headers: {
           'apikey': SUPABASE_KEY,
