@@ -1,17 +1,12 @@
-// api/tokens.js — MemeScope Token API (Optimized for Vercel 10s timeout)
-// Parallel fetching + batch DexScreener enrichment
+// api/tokens.js — MemeScope Token API (Reads from Supabase)
+// Cloudflare Worker fills the database every 2 minutes
+// This API just reads from it — super fast
 
-const CACHE_TTL = 120000;
+const SUPABASE_URL = 'https://rkemboxtxdlkincfkxil.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_8YVBJrxaLmYTcwy_d6_8mw_aPhaH_YE';
+
+const CACHE_TTL = 30000; // 30 second in-memory cache
 let cache = { data: null, ts: 0 };
-
-const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'sui-network', 'tron'];
-
-const MEME_SEARCH_TERMS = [
-  'pepe','doge','shib','bonk','floki','wojak','chad','meme','inu','cat',
-  'frog','moon','elon','trump','ai','grok','brett','toshi','degen','based',
-  'pnut','goat','virtual','anime','neiro','popcat','wif','render','pengu',
-  'bome','turbo','ponke','mog','dog','rocket','pork','sol','sui'
-];
 
 async function safeFetch(url, opts) {
   try {
@@ -19,6 +14,44 @@ async function safeFetch(url, opts) {
     if (!r.ok) return null;
     return await r.json();
   } catch { return null; }
+}
+
+// Convert database row to the format MemeScope frontend expects
+function formatToken(row) {
+  // Calculate age string from timestamp
+  let age = '??';
+  if (row.age) {
+    const ageHrs = (Date.now() - new Date(row.age).getTime()) / 3600000;
+    if (ageHrs < 1) age = Math.round(ageHrs * 60) + 'm';
+    else if (ageHrs < 24) age = Math.round(ageHrs) + 'h';
+    else if (ageHrs < 720) age = Math.round(ageHrs / 24) + 'd';
+    else if (ageHrs < 8760) age = Math.round(ageHrs / 720) + 'mo';
+    else age = Math.round(ageHrs / 8760) + 'y';
+  }
+
+  return {
+    sym: row.symbol || '???',
+    name: row.name || 'Unknown',
+    img: row.image || '',
+    price: row.price || 0,
+    mcap: row.mcap || 0,
+    vol: row.volume || 0,
+    liq: row.liquidity || 0,
+    p5m: row.p5m || 0,
+    p1h: row.p1h || 0,
+    p6h: row.p6h || 0,
+    p24h: row.p24h || 0,
+    age: age,
+    txn: row.txns || 0,
+    net: row.chain || 'solana',
+    dex: row.dex || '',
+    social: 0,
+    boosted: row.boosted || false,
+    website: row.website || '',
+    twitter: row.twitter || '',
+    telegram: row.telegram || '',
+    ca: row.address || '',
+  };
 }
 
 function scoreToken(t) {
@@ -41,6 +74,7 @@ function scoreToken(t) {
   return score;
 }
 
+// DexScreener pair parser for live search fallback
 function parseDexPair(p) {
   const chainMap = {
     'solana': 'solana', 'ethereum': 'eth', 'base': 'base', 'bsc': 'bsc', 'sui': 'sui', 'tron': 'tron',
@@ -64,13 +98,12 @@ function parseDexPair(p) {
 
   let txns = 0;
   if (p.txns && p.txns.h24) txns = (p.txns.h24.buys || 0) + (p.txns.h24.sells || 0);
-  let tokenImg = '';
-  if (p.info && p.info.imageUrl) tokenImg = p.info.imageUrl;
 
   return {
     sym: p.baseToken ? p.baseToken.symbol.toUpperCase() : '???',
     name: p.baseToken ? p.baseToken.name : 'Unknown',
-    img: tokenImg, price, mcap, vol, liq,
+    img: p.info?.imageUrl || '',
+    price, mcap, vol, liq,
     p5m: pc.m5 ? parseFloat(pc.m5) : 0,
     p1h: pc.h1 ? parseFloat(pc.h1) : 0,
     p6h: pc.h6 ? parseFloat(pc.h6) : 0,
@@ -84,35 +117,14 @@ function parseDexPair(p) {
   };
 }
 
-// Batch enrich via DexScreener (comma-separated, up to 30 addresses)
-async function batchEnrich(addresses) {
-  if (!addresses.length) return [];
-  const results = [];
-  for (let i = 0; i < addresses.length; i += 30) {
-    const chunk = addresses.slice(i, i + 30);
-    const url = 'https://api.dexscreener.com/latest/dex/tokens/' + chunk.join(',');
-    const data = await safeFetch(url);
-    if (data?.pairs) {
-      const best = {};
-      for (const p of data.pairs) {
-        const addr = p.baseToken?.address;
-        if (!addr) continue;
-        const liq = p.liquidity?.usd || 0;
-        if (!best[addr] || liq > (best[addr].liquidity?.usd || 0)) best[addr] = p;
-      }
-      results.push(...Object.values(best));
-    }
-  }
-  return results;
-}
-
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=60');
+  res.setHeader('Cache-Control', 's-maxage=30, stale-while-revalidate=60');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  // === LIVE SEARCH — goes direct to DexScreener ===
   const search = req.query?.search;
   if (search) {
     const data = await safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(search));
@@ -123,156 +135,39 @@ export default async function handler(req, res) {
     return res.status(200).json({ tokens: [], search: true });
   }
 
+  // === MAIN FEED — read from Supabase ===
   if (cache.data && (Date.now() - cache.ts < CACHE_TTL)) {
     return res.status(200).json({ tokens: cache.data, cached: true });
   }
 
   try {
-    const seenCAs = new Set();
-    const allTokens = [];
-
-    function addToken(t) {
-      if (!t.ca || seenCAs.has(t.ca)) return;
-      if (t.mcap < 10000 || t.liq < 5000) return;
-      // Scam filter: if mcap is 50x+ the liquidity, it's likely fake/honeypot
-      if (t.liq > 0 && t.mcap / t.liq > 50) return;
-      seenCAs.add(t.ca);
-      allTokens.push(t);
-    }
-
-    // ========= ALL PHASES IN PARALLEL =========
-
-    // Phase 1: GeckoTerminal trending + new + top pools pages 1-3
-    const geckoPromises = GECKO_CHAINS.flatMap(chain => [
-      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/trending_pools?page=1&include=base_token', { headers: { 'Accept': 'application/json' } }),
-      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/trending_pools?page=2&include=base_token', { headers: { 'Accept': 'application/json' } }),
-      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/trending_pools?page=3&include=base_token', { headers: { 'Accept': 'application/json' } }),
-      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/new_pools?page=1&include=base_token', { headers: { 'Accept': 'application/json' } }),
-      safeFetch('https://api.geckoterminal.com/api/v2/networks/' + chain + '/new_pools?page=2&include=base_token', { headers: { 'Accept': 'application/json' } }),
-    ]);
-
-    // Phase 2: DexScreener profiles + boosted
-    const dsProfilePromise = safeFetch('https://api.dexscreener.com/token-profiles/latest/v1');
-    const dsBoostedPromise = safeFetch('https://api.dexscreener.com/token-boosts/latest/v1');
-
-    // Phase 3: Meme search terms
-    const searchPromises = MEME_SEARCH_TERMS.map(term =>
-      safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + term)
+    // Fetch tokens updated in the last 30 minutes, ordered by volume
+    const supabaseResp = await fetch(
+      SUPABASE_URL + '/rest/v1/tokens?select=*&updated_at=gte.' + new Date(Date.now() - 30 * 60 * 1000).toISOString() + '&order=volume.desc&limit=1000',
+      {
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_KEY,
+        },
+      }
     );
 
-    // Phase 4: CoinGecko trending (free, no key)
-    const cgTrendingPromise = safeFetch('https://api.coingecko.com/api/v3/search/trending');
-
-    // Phase 5: DexScreener chain-specific trending searches
-    const dsChainSearches = [
-      'cetus sui', 'turbos sui', 'bluefin sui', 'sundog tron',
-      'pump fun', 'sunpump', 'viral', 'nft', 'gaming'
-    ].map(q => safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(q)));
-
-    // FIRE EVERYTHING AT ONCE
-    const [geckoResults, profiles, boosted, cgTrending, dsChainResults, ...searchResults] = await Promise.all([
-      Promise.all(geckoPromises),
-      dsProfilePromise,
-      dsBoostedPromise,
-      cgTrendingPromise,
-      Promise.all(dsChainSearches),
-      ...searchPromises,
-    ]);
-
-    // --- Process GeckoTerminal results (including dedicated Sui/Tron) ---
-    const geckoAddresses = new Set();
-    const geckoImages = {}; // address -> image URL fallback
-    const allGeckoData = [...geckoResults];
-    for (const data of allGeckoData) {
-      if (!data?.data) continue;
-      // Extract token images from included data
-      if (data.included) {
-        for (const inc of data.included) {
-          if (inc.type === 'token' && inc.attributes?.image_url) {
-            const tid = inc.id || '';
-            const uidx = tid.indexOf('_');
-            if (uidx > -1) {
-              geckoImages[tid.substring(uidx + 1)] = inc.attributes.image_url;
-            }
-          }
-        }
-      }
-      for (const pool of data.data.slice(0, 20)) {
-        const tokenId = pool.relationships?.base_token?.data?.id || '';
-        const underscoreIdx = tokenId.indexOf('_');
-        if (underscoreIdx > -1) {
-          geckoAddresses.add(tokenId.substring(underscoreIdx + 1));
-        }
-      }
+    if (!supabaseResp.ok) {
+      throw new Error('Supabase fetch failed: ' + supabaseResp.status);
     }
 
-    // --- Process DexScreener profiles/boosted ---
-    const dsAddresses = new Set();
-    if (profiles) {
-      for (const p of profiles.slice(0, 80)) {
-        if (p.tokenAddress) dsAddresses.add(p.tokenAddress);
-      }
-    }
-    if (boosted) {
-      for (const p of boosted.slice(0, 60)) {
-        if (p.tokenAddress) {
-          dsAddresses.add(p.tokenAddress);
-          // NOT marking as boosted — only MemeScope's own boost system does that
-        }
-      }
-    }
+    const rows = await supabaseResp.json();
 
-    // --- Process search results directly (they already have pair data) ---
-    for (const data of searchResults) {
-      if (data?.pairs) {
-        for (const p of data.pairs.slice(0, 10)) {
-          addToken(parseDexPair(p));
-        }
-      }
-    }
-
-    // --- Process CoinGecko trending coins ---
-    const cgAddresses = new Set();
-    if (cgTrending?.coins) {
-      for (const c of cgTrending.coins) {
-        const item = c.item;
-        if (item?.platforms) {
-          for (const [platform, addr] of Object.entries(item.platforms)) {
-            if (addr) cgAddresses.add(addr);
-          }
-        }
-      }
-    }
-
-    // --- Process DexScreener chain-specific searches ---
-    for (const data of dsChainResults) {
-      if (data?.pairs) {
-        for (const p of data.pairs.slice(0, 15)) {
-          addToken(parseDexPair(p));
-        }
-      }
-    }
-
-    // --- Batch enrich GeckoTerminal + DexScreener addresses ---
-    const allAddresses = [...new Set([...geckoAddresses, ...dsAddresses, ...cgAddresses])];
-    const enriched = await batchEnrich(allAddresses.slice(0, 250));
-    for (const p of enriched) {
-      addToken(parseDexPair(p));
-    }
-
-    // Score and sort
-    for (const t of allTokens) {
-      // Fill in missing images from GeckoTerminal
-      if (!t.img && t.ca && geckoImages[t.ca]) {
-        t.img = geckoImages[t.ca];
-      }
+    // Convert to frontend format and score
+    const tokens = rows.map(formatToken);
+    for (const t of tokens) {
       t._score = scoreToken(t);
       t.social = Math.min(100, Math.round(t._score));
     }
-    allTokens.sort((a, b) => b._score - a._score);
+    tokens.sort((a, b) => b._score - a._score);
 
-    cache = { data: allTokens, ts: Date.now() };
-    return res.status(200).json({ tokens: allTokens, cached: false });
+    cache = { data: tokens, ts: Date.now() };
+    return res.status(200).json({ tokens: tokens, cached: false, count: tokens.length });
 
   } catch (err) {
     if (cache.data) return res.status(200).json({ tokens: cache.data, cached: true, error: err.message });
