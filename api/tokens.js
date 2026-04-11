@@ -87,6 +87,7 @@ function parseDexPair(p) {
     twitter: p.info?.socials?.find(s => s.type === 'twitter')?.url || '',
     telegram: p.info?.socials?.find(s => s.type === 'telegram')?.url || '',
     ca: p.baseToken?.address || '',
+    pair: p.quoteToken ? p.quoteToken.symbol.toUpperCase() : '',
   };
 }
 
