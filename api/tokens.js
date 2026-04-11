@@ -57,10 +57,11 @@ function parseDexPair(p) {
   const liq = p.liquidity ? (p.liquidity.usd || 0) : 0;
   const pc = p.priceChange || {};
 
-  let age = '2014';
+  let age = '\u2014';
   if (p.pairCreatedAt) {
     const ageHrs = (Date.now() - p.pairCreatedAt) / 3600000;
-    if (ageHrs < 1) age = Math.round(ageHrs * 60) + 'm';
+    if (ageHrs < 0 || ageHrs > 43800) age = '\u2014';
+    else if (ageHrs < 1) age = Math.round(ageHrs * 60) + 'm';
     else if (ageHrs < 24) age = Math.round(ageHrs) + 'h';
     else if (ageHrs < 720) age = Math.round(ageHrs / 24) + 'd';
     else if (ageHrs < 8760) age = Math.round(ageHrs / 720) + 'mo';
@@ -222,6 +223,7 @@ export default async function handler(req, res) {
       if (!t.ca || seenCAs.has(t.ca)) return;
       if (t.mcap < 10000 || t.liq < 5000) return;
       if (t.liq > 0 && t.mcap / t.liq > 50) return;
+      if (t.age && (t.age.endsWith('m') && parseInt(t.age) < 30)) return;
       seenCAs.add(t.ca);
       allTokens.push(t);
     }
