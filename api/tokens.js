@@ -57,7 +57,7 @@ function parseDexPair(p) {
   const liq = p.liquidity ? (p.liquidity.usd || 0) : 0;
   const pc = p.priceChange || {};
 
-  let age = '??';
+  let age = '2014';
   if (p.pairCreatedAt) {
     const ageHrs = (Date.now() - p.pairCreatedAt) / 3600000;
     if (ageHrs < 1) age = Math.round(ageHrs * 60) + 'm';
@@ -126,7 +126,7 @@ async function fetchFromSupabase() {
     if (!resp.ok) return [];
     const rows = await resp.json();
     return rows.map(row => {
-      let age = '??';
+      let age = '2014';
       if (row.age) {
         const ageHrs = (Date.now() - new Date(row.age).getTime()) / 3600000;
         if (ageHrs < 1) age = Math.round(ageHrs * 60) + 'm';
@@ -175,7 +175,7 @@ export default async function handler(req, res) {
     for (const row of supabaseResp) {
       if (!row.address || seenCA.has(row.address)) continue;
       seenCA.add(row.address);
-      let age = '??';
+      let age = '2014';
       if (row.age) {
         const ageHrs = (Date.now() - new Date(row.age).getTime()) / 3600000;
         if (ageHrs < 1) age = Math.round(ageHrs * 60) + 'm';
