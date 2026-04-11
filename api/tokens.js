@@ -6,7 +6,7 @@
 const SUPABASE_URL = 'https://rkemboxtxdlkincfkxil.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_8YVBJrxaLmYTcwy_d6_8mw_aPhaH_YE';
 
-const CACHE_TTL = 120000;
+const CACHE_TTL = 30000;
 let cache = { data: null, ts: 0 };
 
 const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'sui-network', 'tron'];
@@ -344,26 +344,10 @@ export default async function handler(req, res) {
       t.social = Math.min(100, Math.round(t._score));
     }
 
-    // Merge in Supabase tokens that aren't already in the live results
-    // Skip dead/rugged tokens (near-zero liq or mcap) and stale extreme percentages
-    try {
-      const sbTokens = await fetchFromSupabase();
-      for (const sbt of sbTokens) {
-        if (!sbt.ca || seenCAs.has(sbt.ca)) continue;
-        if (sbt.liq < 5000 || sbt.mcap < 10000) continue;
-        if (sbt.liq > 0 && sbt.mcap / sbt.liq > 50) continue;
-        if (Math.abs(sbt.p24h) > 500) continue;
-        seenCAs.add(sbt.ca);
-        sbt._score = scoreToken(sbt);
-        sbt.social = Math.min(100, Math.round(sbt._score));
-        allTokens.push(sbt);
-      }
-    } catch(e) { /* supabase merge failed, continue with live only */ }
-
     allTokens.sort((a, b) => b._score - a._score);
 
     cache = { data: allTokens, ts: Date.now() };
-    return res.status(200).json({ tokens: allTokens, cached: false, source: 'hybrid', live: allTokens.length });
+    return res.status(200).json({ tokens: allTokens, cached: false, source: 'live' });
 
   } catch (err) {
     // Live fetch failed — fall back to Supabase
