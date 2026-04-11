@@ -224,6 +224,9 @@ export default async function handler(req, res) {
       if (t.mcap < 10000 || t.liq < 5000) return;
       if (t.liq > 0 && t.mcap / t.liq > 50) return;
       if (t.age && (t.age.endsWith('m') && parseInt(t.age) < 30)) return;
+      // Scam filters: volume way too high vs mcap, or liquidity too thin vs volume
+      if (t.vol > 0 && t.mcap > 0 && t.vol / t.mcap > 15) return;
+      if (t.vol > 0 && t.liq > 0 && t.vol / t.liq > 100) return;
       seenCAs.add(t.ca);
       allTokens.push(t);
     }
