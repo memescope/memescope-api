@@ -345,10 +345,14 @@ export default async function handler(req, res) {
     }
 
     // Merge in Supabase tokens that aren't already in the live results
+    // Skip dead/rugged tokens (near-zero liq or mcap) and stale extreme percentages
     try {
       const sbTokens = await fetchFromSupabase();
       for (const sbt of sbTokens) {
         if (!sbt.ca || seenCAs.has(sbt.ca)) continue;
+        if (sbt.liq < 5000 || sbt.mcap < 10000) continue;
+        if (sbt.liq > 0 && sbt.mcap / sbt.liq > 50) continue;
+        if (Math.abs(sbt.p24h) > 500) continue;
         seenCAs.add(sbt.ca);
         sbt._score = scoreToken(sbt);
         sbt.social = Math.min(100, Math.round(sbt._score));
