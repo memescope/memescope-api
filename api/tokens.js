@@ -222,6 +222,7 @@ export default async function handler(req, res) {
 
     function addToken(t) {
       if (!t.ca || seenCAs.has(t.ca)) return;
+      if (!t.img) return;
       if (t.mcap < 10000 || t.liq < 5000) return;
       if (t.liq > 0 && t.mcap / t.liq > 50) return;
       if (t.age && (t.age.endsWith('m') && parseInt(t.age) < 30)) return;
