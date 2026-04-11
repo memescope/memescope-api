@@ -335,7 +335,7 @@ export default async function handler(req, res) {
       addToken(parseDexPair(p));
     }
 
-    // Score and sort
+    // Score and sort live tokens
     for (const t of allTokens) {
       if (!t.img && t.ca && geckoImages[t.ca]) {
         t.img = geckoImages[t.ca];
@@ -343,10 +343,23 @@ export default async function handler(req, res) {
       t._score = scoreToken(t);
       t.social = Math.min(100, Math.round(t._score));
     }
+
+    // Merge in Supabase tokens that aren't already in the live results
+    try {
+      const sbTokens = await fetchFromSupabase();
+      for (const sbt of sbTokens) {
+        if (!sbt.ca || seenCAs.has(sbt.ca)) continue;
+        seenCAs.add(sbt.ca);
+        sbt._score = scoreToken(sbt);
+        sbt.social = Math.min(100, Math.round(sbt._score));
+        allTokens.push(sbt);
+      }
+    } catch(e) { /* supabase merge failed, continue with live only */ }
+
     allTokens.sort((a, b) => b._score - a._score);
 
     cache = { data: allTokens, ts: Date.now() };
-    return res.status(200).json({ tokens: allTokens, cached: false, source: 'live' });
+    return res.status(200).json({ tokens: allTokens, cached: false, source: 'hybrid', live: allTokens.length });
 
   } catch (err) {
     // Live fetch failed — fall back to Supabase
