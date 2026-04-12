@@ -6,7 +6,7 @@
 const SUPABASE_URL = 'https://rkemboxtxdlkincfkxil.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_8YVBJrxaLmYTcwy_d6_8mw_aPhaH_YE';
 
-const CACHE_TTL = 30000;
+const CACHE_TTL = 120000;
 let cache = { data: null, ts: 0 };
 
 const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'sui-network', 'tron'];
