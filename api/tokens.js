@@ -295,13 +295,9 @@ export default async function handler(req, res) {
 
     // --- Process DexScreener profiles/boosted ---
     const dsAddresses = new Set();
-    const profileAddresses = new Set();
     if (profiles) {
       for (const p of profiles.slice(0, 80)) {
-        if (p.tokenAddress) {
-          dsAddresses.add(p.tokenAddress);
-          if (p.header) profileAddresses.add(p.tokenAddress);
-        }
+        if (p.tokenAddress) dsAddresses.add(p.tokenAddress);
       }
     }
     if (boosted) {
@@ -355,7 +351,6 @@ export default async function handler(req, res) {
       }
       t._score = scoreToken(t);
       t.social = Math.min(100, Math.round(t._score));
-      t.hasProfile = profileAddresses.has(t.ca);
     }
 
     allTokens.sort((a, b) => b._score - a._score);
