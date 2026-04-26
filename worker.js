@@ -605,6 +605,166 @@ async function scrapeTokens() {
   return { tokens: allTokens, group: groupIdx, terms: searchTerms.length };
 }
 
+// ============ TOKENS FEED (replaces Vercel) ============
+
+const tokensCache = { data: null, ts: 0 };
+const TOKENS_TTL = 30000; // 30 seconds
+
+function formatAge(isoDate) {
+  if (!isoDate) return '—';
+  const ageHrs = (Date.now() - new Date(isoDate).getTime()) / 3600000;
+  if (ageHrs < 0 || ageHrs > 43800) return '—';
+  if (ageHrs < 1) return Math.round(ageHrs * 60) + 'm';
+  if (ageHrs < 24) return Math.round(ageHrs) + 'h';
+  if (ageHrs < 720) return Math.round(ageHrs / 24) + 'd';
+  if (ageHrs < 8760) return Math.round(ageHrs / 720) + 'mo';
+  return Math.round(ageHrs / 8760) + 'y';
+}
+
+function rowToToken(row) {
+  return {
+    sym: row.symbol || '???',
+    name: row.name || 'Unknown',
+    img: row.image || '',
+    price: row.price || 0,
+    mcap: row.mcap || 0,
+    vol: row.volume || 0,
+    liq: row.liquidity || 0,
+    p5m: row.p5m || 0,
+    p1h: row.p1h || 0,
+    p6h: row.p6h || 0,
+    p24h: row.p24h || 0,
+    age: formatAge(row.age),
+    txn: row.txns || 0,
+    net: row.chain || 'solana',
+    dex: row.dex || '',
+    social: 0,
+    boosted: false,
+    website: row.website || '',
+    twitter: row.twitter || '',
+    telegram: row.telegram || '',
+    ca: row.address || '',
+    pairAddress: row.pair_address || '',
+  };
+}
+
+async function handleTokens(url, env) {
+  const search = url.searchParams.get('search');
+  const supabaseUrl = env.SUPABASE_URL;
+  const supabaseKey = env.SUPABASE_KEY;
+  const headers = { 'apikey': supabaseKey, 'Authorization': 'Bearer ' + supabaseKey };
+
+  // === SEARCH ===
+  if (search) {
+    const [dexData, sbResp] = await Promise.all([
+      safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(search)),
+      safeFetch(
+        supabaseUrl + '/rest/v1/tokens?select=*&or=(symbol.ilike.*' + encodeURIComponent(search) + '*,name.ilike.*' + encodeURIComponent(search) + '*)&order=mcap.desc&limit=10',
+        { headers }
+      ),
+    ]);
+
+    const results = [];
+    const seenCA = new Set();
+
+    // Supabase results first
+    if (sbResp) {
+      for (const row of sbResp) {
+        if (!row.address || seenCA.has(row.address)) continue;
+        seenCA.add(row.address);
+        results.push(rowToToken(row));
+      }
+    }
+
+    // DexScreener results
+    if (dexData?.pairs) {
+      const dexChainMap = { 'solana':'solana','ethereum':'eth','base':'base','bsc':'bsc','sui':'sui','tron':'tron','arbitrum':'arbitrum','avalanche':'avalanche','polygon':'polygon','optimism':'optimism','blast':'blast','ton':'ton' };
+      for (const p of dexData.pairs.slice(0, 20)) {
+        const ca = p.baseToken?.address;
+        if (!ca || seenCA.has(ca)) continue;
+        const mcap = p.marketCap || p.fdv || 0;
+        if (mcap < 1000) continue;
+        seenCA.add(ca);
+        const pc = p.priceChange || {};
+        let txns = 0;
+        if (p.txns?.h24) txns = (p.txns.h24.buys || 0) + (p.txns.h24.sells || 0);
+        let age = '—';
+        if (p.pairCreatedAt) {
+          const ageHrs = (Date.now() - p.pairCreatedAt) / 3600000;
+          if (ageHrs >= 0 && ageHrs < 43800) {
+            if (ageHrs < 1) age = Math.round(ageHrs * 60) + 'm';
+            else if (ageHrs < 24) age = Math.round(ageHrs) + 'h';
+            else if (ageHrs < 720) age = Math.round(ageHrs / 24) + 'd';
+            else if (ageHrs < 8760) age = Math.round(ageHrs / 720) + 'mo';
+            else age = Math.round(ageHrs / 8760) + 'y';
+          }
+        }
+        results.push({
+          sym: p.baseToken.symbol.toUpperCase(), name: p.baseToken.name || 'Unknown',
+          img: p.info?.imageUrl || '', price: p.priceUsd ? parseFloat(p.priceUsd) : 0,
+          mcap, vol: p.volume ? (p.volume.h24 || 0) : 0, liq: p.liquidity ? (p.liquidity.usd || 0) : 0,
+          p5m: pc.m5 ? parseFloat(pc.m5) : 0, p1h: pc.h1 ? parseFloat(pc.h1) : 0,
+          p6h: pc.h6 ? parseFloat(pc.h6) : 0, p24h: pc.h24 ? parseFloat(pc.h24) : 0,
+          age, txn: txns, net: dexChainMap[p.chainId] || p.chainId || 'solana', dex: p.dexId || '',
+          social: 0, boosted: false, ca,
+          website: p.info?.websites?.[0]?.url || '',
+          twitter: p.info?.socials?.find(s => s.type === 'twitter')?.url || '',
+          pairAddress: p.pairAddress || '',
+        });
+      }
+    }
+
+    results.sort((a, b) => (b.mcap || 0) - (a.mcap || 0));
+    return new Response(JSON.stringify({ tokens: results.slice(0, 20), search: true }), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+    });
+  }
+
+  // === MAIN FEED ===
+  if (tokensCache.data && Date.now() - tokensCache.ts < TOKENS_TTL) {
+    return new Response(JSON.stringify({ tokens: tokensCache.data, cached: true }), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 's-maxage=25, stale-while-revalidate=10', ...corsHeaders() },
+    });
+  }
+
+  try {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const resp = await fetch(
+      supabaseUrl + '/rest/v1/tokens?select=*&updated_at=gte.' + cutoff + '&order=volume.desc&limit=1000',
+      { headers }
+    );
+    if (!resp.ok) {
+      // Return stale cache if available
+      if (tokensCache.data) {
+        return new Response(JSON.stringify({ tokens: tokensCache.data, cached: true, stale: true }), {
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+        });
+      }
+      return new Response(JSON.stringify({ tokens: [], error: 'Supabase error ' + resp.status }), {
+        status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+      });
+    }
+
+    const rows = await resp.json();
+    const tokens = rows.map(rowToToken).filter(t => t.img); // only tokens with images
+    tokensCache.data = tokens;
+    tokensCache.ts = Date.now();
+
+    return new Response(JSON.stringify({ tokens, cached: false }), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 's-maxage=25, stale-while-revalidate=10', ...corsHeaders() },
+    });
+  } catch (e) {
+    if (tokensCache.data) {
+      return new Response(JSON.stringify({ tokens: tokensCache.data, cached: true, stale: true }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+      });
+    }
+    return new Response(JSON.stringify({ tokens: [], error: e.message }), {
+      status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+    });
+  }
+}
+
 // ============ CLOUDFLARE WORKER ENTRY POINTS ============
 
 export default {
@@ -638,6 +798,11 @@ export default {
       return handleTrades(url);
     }
 
+    // === TOKENS FEED (replaces Vercel API) ===
+    if (url.pathname === '/tokens') {
+      return handleTokens(url, env);
+    }
+
     // === MANUAL SCRAPER TRIGGER ===
     if (url.pathname === '/run') {
       try {
@@ -667,6 +832,7 @@ export default {
       routes: {
         '/': 'This status page',
         '/run': 'Manual scraper trigger',
+        '/tokens': 'Token feed + search — params: ?search=query',
         '/ohlcv': 'OHLCV chart proxy — params: chain, address, resolution',
         '/trades': 'Recent trades proxy — params: chain, address',
       },
