@@ -648,6 +648,31 @@ function rowToToken(row) {
   };
 }
 
+async function handleBugReport(request) {
+  try {
+    const body = await request.json();
+    const message = (body.message || '').trim();
+    if (!message) {
+      return new Response(JSON.stringify({ error: 'Message required' }), {
+        status: 400, headers: { ...corsHeaders(), 'Content-Type': 'application/json' }
+      });
+    }
+    console.log('BUG_REPORT:', JSON.stringify({
+      message,
+      email: (body.email || '').trim() || null,
+      url: body.url || null,
+      time: new Date().toISOString()
+    }));
+    return new Response(JSON.stringify({ ok: true }), {
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: 'Internal error' }), {
+      status: 500, headers: { ...corsHeaders(), 'Content-Type': 'application/json' }
+    });
+  }
+}
+
 async function handleTokens(url, env) {
   const search = url.searchParams.get('search');
   const supabaseUrl = env.SUPABASE_URL;
@@ -802,6 +827,11 @@ export default {
     // === TRADES PROXY ROUTE ===
     if (url.pathname === '/trades') {
       return handleTrades(url);
+    }
+
+    // === BUG REPORT ===
+    if (url.pathname === '/bug-report' && request.method === 'POST') {
+      return handleBugReport(request);
     }
 
     // === TOKENS FEED (replaces Vercel API) ===
