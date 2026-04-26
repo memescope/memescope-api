@@ -748,8 +748,8 @@ async function handleTokens(url, env) {
     const rows = await resp.json();
     const tokens = rows.map(rowToToken).filter(t => {
       if (!t.img) return false;           // no image
-      if (t.liq < 500) return false;       // rugged — liquidity too low
-      if (t.mcap < 500) return false;      // dead — mcap too low
+      if (t.liq < 3000) return false;      // rugged — liquidity too low
+      if (t.mcap < 5000) return false;     // dead — mcap too low
       if (t.vol < 100) return false;       // no activity
       return true;
     });
