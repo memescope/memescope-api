@@ -9,7 +9,7 @@ const SUPABASE_KEY = 'sb_publishable_8YVBJrxaLmYTcwy_d6_8mw_aPhaH_YE';
 const CACHE_TTL = 120000;
 let cache = { data: null, ts: 0 };
 
-const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'sui-network', 'tron'];
+const GECKO_CHAINS = ['solana', 'eth', 'base', 'bsc', 'sui-network', 'tron', 'arbitrum', 'avax', 'polygon_pos', 'optimism', 'blast', 'ton'];
 
 const MEME_SEARCH_TERMS = [
   'pepe','doge','shib','bonk','floki','wojak','chad','meme','inu','cat',
@@ -49,6 +49,7 @@ function scoreToken(t) {
 function parseDexPair(p) {
   const chainMap = {
     'solana': 'solana', 'ethereum': 'eth', 'base': 'base', 'bsc': 'bsc', 'sui': 'sui', 'tron': 'tron',
+    'arbitrum': 'arbitrum', 'avalanche': 'avalanche', 'polygon': 'polygon', 'optimism': 'optimism', 'blast': 'blast', 'ton': 'ton',
   };
   const net = chainMap[p.chainId] || p.chainId || 'solana';
   const price = p.priceUsd ? parseFloat(p.priceUsd) : 0;
@@ -256,7 +257,9 @@ export default async function handler(req, res) {
 
     const dsChainSearches = [
       'cetus sui', 'turbos sui', 'bluefin sui', 'sundog tron',
-      'pump fun', 'sunpump', 'viral', 'nft', 'gaming'
+      'pump fun', 'sunpump', 'viral', 'nft', 'gaming',
+      'camelot arbitrum', 'trader joe avalanche', 'quickswap polygon',
+      'velodrome optimism', 'thruster blast', 'ston fi ton'
     ].map(q => safeFetch('https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(q)));
 
     const [geckoResults, profiles, boosted, cgTrending, dsChainResults, ...searchResults] = await Promise.all([
