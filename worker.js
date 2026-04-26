@@ -748,7 +748,7 @@ async function handleTokens(url, env) {
   // === MAIN FEED ===
   if (tokensCache.data && Date.now() - tokensCache.ts < TOKENS_TTL) {
     return new Response(JSON.stringify({ tokens: tokensCache.data, cached: true }), {
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 's-maxage=25, stale-while-revalidate=10', ...corsHeaders() },
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders() },
     });
   }
 
@@ -776,13 +776,14 @@ async function handleTokens(url, env) {
       if (t.liq < 3000) return false;      // rugged — liquidity too low
       if (t.mcap < 5000) return false;     // dead — mcap too low
       if (t.vol < 100) return false;       // no activity
+      if (t.price <= 0) return false;      // dead — zero price
       return true;
     });
     tokensCache.data = tokens;
     tokensCache.ts = Date.now();
 
     return new Response(JSON.stringify({ tokens, cached: false }), {
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 's-maxage=25, stale-while-revalidate=10', ...corsHeaders() },
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders() },
     });
   } catch (e) {
     if (tokensCache.data) {
