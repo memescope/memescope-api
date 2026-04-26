@@ -728,7 +728,7 @@ async function handleTokens(url, env) {
   }
 
   try {
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const cutoff = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     const resp = await fetch(
       supabaseUrl + '/rest/v1/tokens?select=*&updated_at=gte.' + cutoff + '&order=volume.desc&limit=1000',
       { headers }
@@ -746,7 +746,13 @@ async function handleTokens(url, env) {
     }
 
     const rows = await resp.json();
-    const tokens = rows.map(rowToToken).filter(t => t.img); // only tokens with images
+    const tokens = rows.map(rowToToken).filter(t => {
+      if (!t.img) return false;           // no image
+      if (t.liq < 500) return false;       // rugged — liquidity too low
+      if (t.mcap < 500) return false;      // dead — mcap too low
+      if (t.vol < 100) return false;       // no activity
+      return true;
+    });
     tokensCache.data = tokens;
     tokensCache.ts = Date.now();
 
